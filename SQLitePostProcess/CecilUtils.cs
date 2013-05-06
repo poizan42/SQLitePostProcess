@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using Mono.Cecil;
 using System.Runtime.InteropServices;
+using Mono.Cecil.Cil;
 
 namespace SQLitePostProcess
 {
@@ -43,11 +44,11 @@ namespace SQLitePostProcess
       IEnumerable<ParameterDefinition> parameters = null)
     {
       if ((delegateVisibility & TypeAttributes.VisibilityMask) != delegateVisibility)
-        throw new ArgumentException("Parameter may only contain visibility attribute.", "delegateVisibility");
+        throw new ArgumentException("Parameter may only contain visibility attributes.", "delegateVisibility");
       var objectRef = module.TypeSystem.Object;
       var voidRef = module.TypeSystem.Void;
       var intPtrRef = module.TypeSystem.IntPtr;
-      var multiDelegateRef = module.Import(typeof(MulticastDelegate));
+      var multicastDelegateRef = module.Import(typeof(MulticastDelegate));
       var asyncCallbackRef = module.Import(typeof(AsyncCallback));
       var iAsyncResultRef = module.Import(typeof(IAsyncResult));
       
@@ -57,7 +58,7 @@ namespace SQLitePostProcess
         parameters = Enumerable.Empty<ParameterDefinition>();
 
       TypeAttributes typeAttributes = delegateVisibility | TypeAttributes.AnsiClass | TypeAttributes.Sealed;
-      TypeDefinition td = new TypeDefinition(@namespace, name, typeAttributes, multiDelegateRef);
+      TypeDefinition td = new TypeDefinition(@namespace, name, typeAttributes, multicastDelegateRef);
       MethodAttributes ctorAttributes = MethodAttributes.Public | MethodAttributes.HideBySig |
         MethodAttributes.SpecialName | MethodAttributes.RTSpecialName;
       //.ctor
@@ -112,10 +113,7 @@ namespace SQLitePostProcess
     {
       TypeReference ufpAttrRef = module.Import(typeof(UnmanagedFunctionPointerAttribute));
       TypeReference cconvRef = module.Import(typeof(CallingConvention));
-      MethodReference ufpAttrCtor = ufpAttrRef.Resolve().Methods.First(m => 
-        m.IsRuntimeSpecialName && m.Name == ".ctor" && m.Parameters.Count == 1 &&
-        m.Parameters[0].ParameterType.FullName == typeof(CallingConvention).FullName);
-      ufpAttrCtor = module.Import(ufpAttrCtor);
+      MethodReference ufpAttrCtor = ImportInstanceMethodRef(module, ufpAttrRef, ".ctor", null, cconvRef);
       CustomAttribute ufpAttr = new CustomAttribute(ufpAttrCtor);
       ufpAttr.ConstructorArguments.Add(new CustomAttributeArgument(cconvRef, GetPInvokeCConv(method)));
       CharSet charSet = GetPInvokeCharSet(method);
@@ -212,5 +210,118 @@ namespace SQLitePostProcess
           return CallingConvention.Winapi;
       }
     }
+
+    public static Instruction Clone(this Instruction src)
+    {
+      OpCode oc = src.OpCode;
+      object op = src.Operand;
+      if (op == null)
+        return Instruction.Create(oc);
+      if (op is TypeReference)
+        return Instruction.Create(oc, (TypeReference)op);
+      if (op is CallSite)
+        return Instruction.Create(oc, (CallSite)op);
+      if (op is MethodReference)
+        return Instruction.Create(oc, (MethodReference)op);
+      if (op is FieldReference)
+        return Instruction.Create(oc, (FieldReference)op);
+      if (op is string)
+        return Instruction.Create(oc, (string)op);
+      if (op is sbyte)
+        return Instruction.Create(oc, (sbyte)op);
+      if (op is byte)
+        return Instruction.Create(oc, (byte)op);
+      if (op is int)
+        return Instruction.Create(oc, (int)op);
+      if (op is long)
+        return Instruction.Create(oc, (long)op);
+      if (op is float)
+        return Instruction.Create(oc, (float)op);
+      if (op is double)
+        return Instruction.Create(oc, (double)op);
+      if (op is Instruction)
+        return Instruction.Create(oc, (Instruction)op);
+      if (op is Instruction[])
+        return Instruction.Create(oc, (Instruction[])op);
+      if (op is VariableDefinition)
+        return Instruction.Create(oc, (VariableDefinition)op);
+      if (op is ParameterDefinition)
+        return Instruction.Create(oc, (ParameterDefinition)op);
+      throw new NotSupportedException(String.Format("Operand type '{0}' unsupported.", src.Operand.GetType().AssemblyQualifiedName));
+    }
+
+    public static Instruction ShortestStloc(int varIdx)
+    {
+      switch (varIdx)
+      {
+        case 0: return Instruction.Create(OpCodes.Stloc_0);
+        case 1: return Instruction.Create(OpCodes.Stloc_1);
+        case 2: return Instruction.Create(OpCodes.Stloc_2);
+        case 3: return Instruction.Create(OpCodes.Stloc_3);
+        default:
+          return varIdx <= 255 ? 
+            Instruction.Create(OpCodes.Stloc_S, (byte)varIdx) : 
+            Instruction.Create(OpCodes.Stloc, varIdx);
+      }
+    }
+
+    public static Instruction ShortestLdloc(int varIdx)
+    {
+      switch (varIdx)
+      {
+        case 0: return Instruction.Create(OpCodes.Ldloc_0);
+        case 1: return Instruction.Create(OpCodes.Ldloc_1);
+        case 2: return Instruction.Create(OpCodes.Ldloc_2);
+        case 3: return Instruction.Create(OpCodes.Ldloc_3);
+        default:
+          return varIdx <= 255 ? 
+            Instruction.Create(OpCodes.Ldloc_S, (byte)varIdx) : 
+            Instruction.Create(OpCodes.Ldloc, varIdx);
+      }
+    }
+    
+    public static Instruction ShortestLdarg(ParameterDefinition p)
+    {
+      switch (p.Index)
+      {
+        case 0: return Instruction.Create(OpCodes.Ldarg_0);
+        case 1: return Instruction.Create(OpCodes.Ldarg_1);
+        case 2: return Instruction.Create(OpCodes.Ldarg_2);
+        case 3: return Instruction.Create(OpCodes.Ldarg_3);
+        default:
+          return p.Index <= 255 ? 
+            Instruction.Create(OpCodes.Ldarg_S, p) : 
+            Instruction.Create(OpCodes.Ldarg, p);
+      }
+    }
+
+    public static MethodReference CreateStaticMethodRef(TypeReference declaringType, string name, TypeReference returnType = null, params TypeReference[] parameters)
+    {
+      if (returnType == null)
+        returnType = declaringType.Module.TypeSystem.Void;
+      MethodReference ret = new MethodReference(name, returnType, declaringType);
+      foreach (TypeReference p in parameters)
+        ret.Parameters.Add(new ParameterDefinition(p));
+      return ret;
+    }
+
+    public static MethodReference CreateInstanceMethodRef(TypeReference declaringType, string name, TypeReference returnType = null, params TypeReference[] parameters)
+    {
+      MethodReference ret = CreateStaticMethodRef(declaringType, name, returnType, parameters);
+      ret.HasThis = true;
+      return ret;
+    }
+
+    public static MethodReference ImportStaticMethodRef(ModuleDefinition module, TypeReference declaringType, string name, TypeReference returnType = null, params TypeReference[] parameters)
+    {
+      return module.Import(CreateStaticMethodRef(declaringType, name, returnType, parameters));
+    }
+    
+    public static MethodReference ImportInstanceMethodRef(ModuleDefinition module, TypeReference declaringType, string name, TypeReference returnType = null, params TypeReference[] parameters)
+    {
+      return module.Import(CreateInstanceMethodRef(declaringType, name, returnType, parameters));
+    }
+    
+
   }
 }
